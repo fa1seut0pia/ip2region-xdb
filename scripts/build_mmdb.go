@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sftfjugg/mmdbwriter"
-	"github.com/sftfjugg/mmdbwriter/mmdbtype"
+	"github.com/maxmind/mmdbwriter"
+	"github.com/maxmind/mmdbwriter/mmdbtype"
 )
 
 const (
