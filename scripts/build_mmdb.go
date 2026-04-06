@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"log"
 	"net"
@@ -44,43 +45,8 @@ func parseLine(line string) (string, string, Record, bool) {
 	}, true
 }
 
-func cidrRange(startIP, endIP net.IP) []net.IPNet {
-	var cidrs []net.IPNet
-	for ip := startIP; compareIP(ip, endIP) <= 0; {
-		maxSize := maxCIDR(ip, endIP)
-		_, network, _ := net.ParseCIDR(fmt.Sprintf("%s/%d", ip.String(), maxSize))
-		cidrs = append(cidrs, *network)
-		ip = nextIP(network)
-	}
-	return cidrs
-}
-
 func compareIP(a, b net.IP) int {
-	return bytesCompare(a.To16(), b.To16())
-}
-
-func bytesCompare(a, b []byte) int {
-	for i := 0; i < len(a); i++ {
-		if a[i] < b[i] {
-			return -1
-		}
-		if a[i] > b[i] {
-			return 1
-		}
-	}
-	return 0
-}
-
-func maxCIDR(startIP, endIP net.IP) int {
-	maxMask := 128
-	for prefix := 128; prefix >= 0; prefix-- {
-		_, network, _ := net.ParseCIDR(fmt.Sprintf("%s/%d", startIP.String(), prefix))
-		if compareIP(lastIP(network), endIP) <= 0 {
-			maxMask = prefix
-			break
-		}
-	}
-	return maxMask
+	return bytes.Compare(a.To16(), b.To16())
 }
 
 func lastIP(n *net.IPNet) net.IP {
@@ -102,6 +68,39 @@ func nextIP(n *net.IPNet) net.IP {
 		}
 	}
 	return ip
+}
+
+func maxCIDR(startIP, endIP net.IP) int {
+	ip := startIP
+	maxPrefix := 32
+	if ip.To4() == nil {
+		maxPrefix = 128
+	}
+
+	for prefix := maxPrefix; prefix >= 0; prefix-- {
+		_, network, err := net.ParseCIDR(fmt.Sprintf("%s/%d", ip.String(), prefix))
+		if err != nil || network == nil {
+			continue
+		}
+		if compareIP(lastIP(network), endIP) <= 0 {
+			return prefix
+		}
+	}
+	return maxPrefix
+}
+
+func cidrRange(startIP, endIP net.IP) []net.IPNet {
+	var cidrs []net.IPNet
+	for ip := startIP; compareIP(ip, endIP) <= 0; {
+		maxSize := maxCIDR(ip, endIP)
+		_, network, err := net.ParseCIDR(fmt.Sprintf("%s/%d", ip.String(), maxSize))
+		if err != nil || network == nil {
+			break
+		}
+		cidrs = append(cidrs, *network)
+		ip = nextIP(network)
+	}
+	return cidrs
 }
 
 func toMMDBRecord(r Record) mmdbtype.DataType {
