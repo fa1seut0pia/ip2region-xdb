@@ -6,7 +6,7 @@ import maxminddb.writer
 import ipaddress
 
 DATA_DIR = "data"
-OUTPUT_FILE = os.path.join(DATA_DIR, "ip2region.mmdb")
+OUTPUT_FILE = os.path.join(DATA_DIR, "GeoCN.mmdb")
 
 # 输入文件
 IPV4_SRC = os.path.join(DATA_DIR, "ipv4_source.txt")
