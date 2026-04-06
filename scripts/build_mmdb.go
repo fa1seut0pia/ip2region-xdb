@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"log"
 	"net"
@@ -10,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/maxmind/mmdbwriter"
-	"github.com/maxmind/mmdbwriter/mmdbtype"
+	"github.com/sftfjugg/mmdbwriter"
+	"github.com/sftfjugg/mmdbwriter/mmdbtype"
 )
 
 const (
@@ -45,78 +44,6 @@ func parseLine(line string) (string, string, Record, bool) {
 	}, true
 }
 
-func compareIP(a, b net.IP) int {
-	return bytes.Compare(a.To16(), b.To16())
-}
-
-func lastIP(n *net.IPNet) net.IP {
-	ip := n.IP
-	mask := n.Mask
-
-	// IPv4
-	if v4 := ip.To4(); v4 != nil {
-		out := make(net.IP, net.IPv4len)
-		for i := 0; i < net.IPv4len; i++ {
-			out[i] = v4[i] | ^mask[i]
-		}
-		return out
-	}
-
-	// IPv6
-	v6 := ip.To16()
-	out := make(net.IP, net.IPv6len)
-	for i := 0; i < net.IPv6len; i++ {
-		out[i] = v6[i] | ^mask[i]
-	}
-	return out
-}
-
-func nextIP(n *net.IPNet) net.IP {
-	ip := lastIP(n)
-	for i := len(ip) - 1; i >= 0; i-- {
-		ip[i]++
-		if ip[i] != 0 {
-			break
-		}
-	}
-	return ip
-}
-
-func maxCIDR(startIP, endIP net.IP) int {
-	maxPrefix := 32
-	if startIP.To4() == nil {
-		maxPrefix = 128
-	}
-
-	for prefix := maxPrefix; prefix >= 0; prefix-- {
-		_, network, err := net.ParseCIDR(fmt.Sprintf("%s/%d", startIP.String(), prefix))
-		if err != nil || network == nil {
-			continue
-		}
-		if compareIP(lastIP(network), endIP) <= 0 {
-			return prefix
-		}
-	}
-	return maxPrefix
-}
-
-func cidrRange(startIP, endIP net.IP) []net.IPNet {
-	var cidrs []net.IPNet
-
-	for ip := startIP; compareIP(ip, endIP) <= 0; {
-		mask := maxCIDR(ip, endIP)
-		_, network, err := net.ParseCIDR(fmt.Sprintf("%s/%d", ip.String(), mask))
-		if err != nil || network == nil {
-			break
-		}
-
-		cidrs = append(cidrs, *network)
-		ip = nextIP(network)
-	}
-
-	return cidrs
-}
-
 func toMMDBRecord(r Record) mmdbtype.DataType {
 	return mmdbtype.Map{
 		"country": mmdbtype.String(r.Country),
@@ -148,13 +75,7 @@ func processFile(writer *mmdbwriter.Tree, filePath string) {
 			continue
 		}
 
-		cidrs := cidrRange(startIP, endIP)
-		for _, cidr := range cidrs {
-			err := writer.Insert(&cidr, toMMDBRecord(record))
-			if err != nil {
-				log.Printf("insert error: %v", err)
-			}
-		}
+		writer.InsertRange(startIP, endIP, toMMDBRecord(record))
 	}
 }
 
@@ -162,16 +83,11 @@ func main() {
 	outputPath := filepath.Join(dataDir, outputMMDB)
 	fmt.Println("Building MMDB:", outputPath)
 
-	writer, err := mmdbwriter.New(
-		mmdbwriter.Options{
-			DatabaseType: "GeoCN",
-			Languages:    []string{"zh-CN"},
-			Description:  map[string]string{"zh-CN": "GeoCN mmdb"},
-		},
+	writer := mmdbwriter.New(
+		"GeoCN",
+		[]string{"zh-CN"},
+		map[string]string{"zh-CN": "GeoCN mmdb"},
 	)
-	if err != nil {
-		log.Fatalf("writer init error: %v", err)
-	}
 
 	processFile(writer, filepath.Join(dataDir, ipv4Src))
 	processFile(writer, filepath.Join(dataDir, ipv6Src))
@@ -182,7 +98,7 @@ func main() {
 	}
 	defer f.Close()
 
-	_, err = writer.WriteTo(f)
+	err = writer.WriteTo(f)
 	if err != nil {
 		log.Fatalf("write mmdb error: %v", err)
 	}
