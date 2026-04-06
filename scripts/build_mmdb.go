@@ -7,7 +7,6 @@ import (
     "net"
     "os"
     "path/filepath"
-    "strconv"
     "strings"
 
     "github.com/maxmind/mmdbwriter"
@@ -34,13 +33,8 @@ type Record struct {
     DistrictsCode  int
 }
 
-func atoi(s string) int {
-    v, _ := strconv.Atoi(s)
-    return v
-}
-
 // 按样本字段顺序解析：
-// startIP|endIP|...|province|city|districts|isp|net|provinceCode|cityCode|districtsCode
+// startIP|endIP|...|province|city|districts|isp|net
 func parseLine(line string) (string, string, Record, bool) {
     parts := strings.Split(strings.TrimSpace(line), "|")
     if len(parts) < 9 {
