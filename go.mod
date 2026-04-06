@@ -3,7 +3,7 @@ module ip2region-xdb
 go 1.22
 
 require (
-    github.com/sftfjugg/mmdbwriter v0.0.0-20240201000000-000000000000
+    github.com/maxmind/mmdbwriter v0.0.0-20221024142553-ff6538147996
 )
 
-replace github.com/sftfjugg/mmdbwriter => github.com/sftfjugg/mmdbwriter latest
+replace github.com/maxmind/mmdbwriter => github.com/sftfjugg/mmdbwriter v0.0.0-20221024142553-ff6538147996
