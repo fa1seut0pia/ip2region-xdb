@@ -155,16 +155,21 @@ jobs:
       # ★★★ 以下为新增内容：构建 mmdb + 上传 mmdb ★★★
       # ---------------------------------------------------------
 
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.21"
+
       - name: Build mmdb
         run: |
           set -euo pipefail
-          python scripts/build_mmdb.py     # ←★ 你需要提供 build_mmdb.py
+          go run scripts/build_mmdb.go
 
       - name: Upload mmdb to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.upstream.outputs.upstream_tag }}
           files: |
-            data/output.mmdb               # ←★ 你生成的 mmdb 文件路径
+            data/GeoCN.mmdb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
