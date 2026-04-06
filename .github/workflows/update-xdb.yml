@@ -26,6 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           pip install -e .
+          pip install maxminddb-writer      # ←★ 新增：安装 mmdb writer
 
       - name: Resolve upstream release tag
         id: upstream
@@ -150,3 +151,21 @@ jobs:
             data/ipv4_source.txt
             data/ipv6_source.txt
           fail_on_unmatched_files: true
+
+      # ---------------------------------------------------------
+      # ★★★ 以下为新增内容：构建 mmdb + 上传 mmdb ★★★
+      # ---------------------------------------------------------
+
+      - name: Build mmdb
+        run: |
+          set -euo pipefail
+          python scripts/build_mmdb.py     # ←★ 你需要提供 build_mmdb.py
+
+      - name: Upload mmdb to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.upstream.outputs.upstream_tag }}
+          files: |
+            data/output.mmdb               # ←★ 你生成的 mmdb 文件路径
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
