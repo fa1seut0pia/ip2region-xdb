@@ -132,6 +132,13 @@ jobs:
           done
           ls -lh data/ip2region_v4.xdb data/ip2region_v6.xdb data/ipv4_source.txt data/ipv6_source.txt
 
+      - name: Generate checksum files
+        run: |
+          set -euo pipefail
+          sha256sum data/* > data/SHA256SUMS.txt
+          sha512sum data/* > data/SHA512SUMS.txt
+          md5sum    data/* > data/MD5SUMS.txt
+
       - name: Get date
         id: date
         run: echo "date=$(date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
@@ -146,11 +153,23 @@ jobs:
           body: |
             Release date: ${{ steps.date.outputs.date }}
             Upstream version: ${{ steps.upstream.outputs.upstream_tag }}
+
+            ## SHA256SUMS
+            ```
+            ${{ steps.sha256.outputs.sha256 }}
+            ```
+
           files: |
             data/ip2region_v4.xdb
             data/ip2region_v6.xdb
             data/ipv4_source.txt
             data/ipv6_source.txt
+            data/GeoLite2-ASN.mmdb
+            data/GeoLite2-City.mmdb
+            data/GeoLite2-Country.mmdb
+            data/SHA256SUMS.txt
+            data/SHA512SUMS.txt
+            data/MD5SUMS.txt
           fail_on_unmatched_files: true
 
       # ---------------------------------------------------------
