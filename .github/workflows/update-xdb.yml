@@ -139,6 +139,12 @@ jobs:
           sha512sum data/* > data/SHA512SUMS.txt
           md5sum    data/* > data/MD5SUMS.txt
 
+      - name: Export sha256 text
+        id: sha256
+        run: |
+          set -euo pipefail
+          echo "sha256=$(sha256sum data/*)" >> "$GITHUB_OUTPUT"
+
       - name: Get date
         id: date
         run: echo "date=$(date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
@@ -148,8 +154,8 @@ jobs:
         env:
           FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
-          tag_name: ${{ steps.upstream.outputs.upstream_tag }}
-          name: ${{ steps.upstream.outputs.upstream_tag }}
+          tag_name: latest
+          name: latest
           body: |
             Release date: ${{ steps.date.outputs.date }}
             Upstream version: ${{ steps.upstream.outputs.upstream_tag }}
@@ -201,6 +207,6 @@ jobs:
         env:
           FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
-          tag_name: ${{ steps.upstream.outputs.upstream_tag }}
+          tag_name: latest
           files: |
             data/GeoCN.mmdb
