@@ -2,6 +2,7 @@ package main
 
 import (
     "bufio"
+    "encoding/json"
     "fmt"
     "log"
     "net"
@@ -31,6 +32,37 @@ type Record struct {
     ProvinceCode   int
     CityCode       int
     DistrictsCode  int
+}
+
+// 行政区划 map
+var (
+    provinceMap  = map[string]int{}
+    cityMap      = map[string]int{}
+    districtMap  = map[string]int{}
+)
+
+// 读取根目录 location.json
+func loadLocationJSON() {
+    f, err := os.ReadFile("location.json")
+    if err != nil {
+        log.Printf("location.json not found")
+        return
+    }
+
+    var raw struct {
+        Province map[string]int `json:"province"`
+        City     map[string]int `json:"city"`
+        District map[string]int `json:"district"`
+    }
+
+    if err := json.Unmarshal(f, &raw); err != nil {
+        log.Printf("location.json parse error: %v", err)
+        return
+    }
+
+    provinceMap = raw.Province
+    cityMap = raw.City
+    districtMap = raw.District
 }
 
 // 按样本字段顺序解析：
@@ -82,6 +114,18 @@ func processFile(writer *mmdbwriter.Tree, filePath string) {
             continue
         }
 
+        // ---- 最小修改：从 location.json 填 code ----
+        if v, ok := provinceMap[record.Province]; ok {
+            record.ProvinceCode = v
+        }
+        if v, ok := cityMap[record.City]; ok {
+            record.CityCode = v
+        }
+        if v, ok := districtMap[record.Districts]; ok {
+            record.DistrictsCode = v
+        }
+        // ----------------------------------------
+
         startIP := net.ParseIP(start)
         endIP := net.ParseIP(end)
         if startIP == nil || endIP == nil {
@@ -95,6 +139,9 @@ func processFile(writer *mmdbwriter.Tree, filePath string) {
 func main() {
     outputPath := filepath.Join(dataDir, outputMMDB)
     fmt.Println("Building MMDB:", outputPath)
+
+    // 加载行政区划 JSON
+    loadLocationJSON()
 
     writer, err := mmdbwriter.New(mmdbwriter.Options{
         DatabaseType: "GeoCN",
