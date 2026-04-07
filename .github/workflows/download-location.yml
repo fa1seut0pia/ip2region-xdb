@@ -15,7 +15,7 @@ jobs:
         run: |
           curl -L \
             https://raw.githubusercontent.com/darlene-he/location/main/data/location.json \
-            -o location.json
+            -o location-原始.json
 
       - name: Commit changes
         run: |
