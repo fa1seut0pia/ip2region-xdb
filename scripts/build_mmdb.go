@@ -2,7 +2,6 @@ package main
 
 import (
     "bufio"
-    "encoding/json"
     "fmt"
     "log"
     "net"
@@ -22,6 +21,7 @@ const (
     ipv6Src = "ipv6_source.txt"
 )
 
+// 样板字段结构：
 type Record struct {
     ISP           string
     Net           string
@@ -33,25 +33,8 @@ type Record struct {
     DistrictsCode int
 }
 
-var adminMap = map[string]int{}
-
-func loadLocationJSON() {
-    f, err := os.ReadFile("location_flat.json")
-    if err != nil {
-        log.Printf("location_flat.json not found")
-        return
-    }
-
-    var raw map[string]int
-
-    if err := json.Unmarshal(f, &raw); err != nil {
-        log.Printf("location_flat.json parse error: %v", err)
-        return
-    }
-
-    adminMap = raw
-}
-
+// 按样本字段顺序解析：
+// startIP|endIP|...|province|city|districts|isp|net|provinceCode|cityCode|districtsCode
 func parseLine(line string) (string, string, Record, bool) {
     parts := strings.Split(strings.TrimSpace(line), "|")
     if len(parts) < 9 {
@@ -70,6 +53,7 @@ func parseLine(line string) (string, string, Record, bool) {
     }, true
 }
 
+// 输出字段严格等于样板
 func toMMDBRecord(r Record) mmdbtype.DataType {
     return mmdbtype.Map{
         "isp":           mmdbtype.String(r.ISP),
@@ -98,22 +82,6 @@ func processFile(writer *mmdbwriter.Tree, filePath string) {
             continue
         }
 
-        // ---- 行政区划匹配（使用 location_flat.json）----
-        if v, ok := adminMap[record.Province]; ok {
-            record.ProvinceCode = v
-        }
-
-        cityKey := record.Province + "-" + record.City
-        if v, ok := adminMap[cityKey]; ok {
-            record.CityCode = v
-        }
-
-        distKey := record.Province + "-" + record.City + "-" + record.Districts
-        if v, ok := adminMap[distKey]; ok {
-            record.DistrictsCode = v
-        }
-        // ------------------------------------------------
-
         startIP := net.ParseIP(start)
         endIP := net.ParseIP(end)
         if startIP == nil || endIP == nil {
@@ -127,8 +95,6 @@ func processFile(writer *mmdbwriter.Tree, filePath string) {
 func main() {
     outputPath := filepath.Join(dataDir, outputMMDB)
     fmt.Println("Building MMDB:", outputPath)
-
-    loadLocationJSON()
 
     writer, err := mmdbwriter.New(mmdbwriter.Options{
         DatabaseType: "GeoCN",
