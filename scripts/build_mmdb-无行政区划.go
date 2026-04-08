@@ -21,7 +21,7 @@ const (
     ipv6Src = "ipv6_source.txt"
 )
 
-// 样板字段结构：严格对齐 raw
+// 样板字段结构：
 type Record struct {
     ISP           string
     Net           string
@@ -53,7 +53,7 @@ func parseLine(line string) (string, string, Record, bool) {
     }, true
 }
 
-// 输出字段严格等于样板 raw
+// 输出字段严格等于样板
 func toMMDBRecord(r Record) mmdbtype.DataType {
     return mmdbtype.Map{
         "isp":           mmdbtype.String(r.ISP),
