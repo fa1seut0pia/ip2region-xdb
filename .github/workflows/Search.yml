@@ -1,4 +1,4 @@
-name: Go Search
+name: "Go 查询行政区划编码“
 
 on:
   workflow_dispatch:
