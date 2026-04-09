@@ -1,4 +1,4 @@
-name: "获取行政区划表"
+name: "拉取行政区划表"
 
 on:
   workflow_dispatch:
