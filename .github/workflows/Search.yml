@@ -1,0 +1,22 @@
+name: Go Search
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "输入名称"
+        required: true
+        default: "海淀区"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Run
+        run: go run main.go "${{ github.event.inputs.name }}"
