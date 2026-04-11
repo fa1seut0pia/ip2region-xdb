@@ -12,8 +12,5 @@ data/*.mmdb
 data/*.xdb
 data/*_source.txt
 
-# Last upstream release tracker
-.last_upstream_release
-
 # uv
 uv.lock

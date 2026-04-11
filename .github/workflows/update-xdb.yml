@@ -1,13 +1,21 @@
 name: update-xdb
 
 on:
-  repository_dispatch:
-    types:
-      - geolite-release
+  schedule:
+    - cron: "0 0 * * *"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional upstream release tag (defaults to latest)"
+        required: false
+        type: string
 
 permissions:
   contents: write
+
+concurrency:
+  group: update-xdb
+  cancel-in-progress: false
 
 jobs:
   update:
@@ -16,24 +24,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          set -euo pipefail
-          pip install -e .
-
       - name: Resolve upstream release tag
         id: upstream
         run: |
           set -euo pipefail
           upstream_tag=""
-          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            upstream_tag="${{ github.event.client_payload.release }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            upstream_tag="${{ inputs.release_tag }}"
           fi
           if [ -z "$upstream_tag" ] || [ "$upstream_tag" = "null" ]; then
             upstream_tag="$(curl -fsSL https://api.github.com/repos/P3TERX/GeoLite.mmdb/releases/latest | jq -r '.tag_name')"
@@ -44,7 +41,50 @@ jobs:
           fi
           echo "upstream_tag=$upstream_tag" >> "$GITHUB_OUTPUT"
 
+      - name: Check if release already exists
+        id: release_exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.upstream.outputs.upstream_tag }}"
+          api_url="https://api.github.com/repos/${{ github.repository }}/releases/tags/${tag}"
+          status_code="$(curl -sS -o /tmp/release_check.json -w '%{http_code}' \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "$api_url")"
+
+          if [ "$status_code" = "200" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release $tag already exists, skipping build."
+          elif [ "$status_code" = "404" ]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Release $tag not found, continue build."
+          else
+            echo "Failed to query release status (HTTP $status_code)." >&2
+            cat /tmp/release_check.json >&2 || true
+            exit 1
+          fi
+
+      - name: Skip when release exists
+        if: steps.release_exists.outputs.exists == 'true'
+        run: echo "No new upstream release to process."
+
+      - name: Setup Python
+        if: steps.release_exists.outputs.exists != 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        if: steps.release_exists.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          pip install -e .
+
       - name: Download mmdb files
+        if: steps.release_exists.outputs.exists != 'true'
         run: |
           set -euo pipefail
           mkdir -p data
@@ -57,6 +97,7 @@ jobs:
           ls -lh data/
 
       - name: Convert to source text files
+        if: steps.release_exists.outputs.exists != 'true'
         run: |
           set -euo pipefail
           python -m ip2region_xdb \
@@ -68,6 +109,7 @@ jobs:
             --output data
 
       - name: Build ip2region maker image
+        if: steps.release_exists.outputs.exists != 'true'
         run: |
           set -euo pipefail
           rm -rf /tmp/ip2region-maker-src
@@ -75,6 +117,7 @@ jobs:
           docker build -t local/ip2region-maker:latest /tmp/ip2region-maker-src/maker/golang
 
       - name: Build IPv4 xdb
+        if: steps.release_exists.outputs.exists != 'true'
         run: |
           set -euo pipefail
           output=$(docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd)/data:/app/data" local/ip2region-maker:latest \
@@ -88,6 +131,7 @@ jobs:
           fi
 
       - name: Build IPv6 xdb
+        if: steps.release_exists.outputs.exists != 'true'
         run: |
           set -euo pipefail
           output=$(docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd)/data:/app/data" local/ip2region-maker:latest \
@@ -101,6 +145,7 @@ jobs:
           fi
 
       - name: Verify IPv4 xdb
+        if: steps.release_exists.outputs.exists != 'true'
         run: |
           set -euo pipefail
           docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd)/data:/app/data" local/ip2region-maker:latest \
@@ -109,6 +154,7 @@ jobs:
                   --version=ipv4
 
       - name: Verify IPv6 xdb
+        if: steps.release_exists.outputs.exists != 'true'
         run: |
           set -euo pipefail
           docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd)/data:/app/data" local/ip2region-maker:latest \
@@ -117,6 +163,7 @@ jobs:
                   --version=ipv6
 
       - name: Validate release artifacts
+        if: steps.release_exists.outputs.exists != 'true'
         run: |
           set -euo pipefail
           for f in data/ip2region_v4.xdb data/ip2region_v6.xdb data/ipv4_source.txt data/ipv6_source.txt; do
@@ -133,10 +180,12 @@ jobs:
           ls -lh data/ip2region_v4.xdb data/ip2region_v6.xdb data/ipv4_source.txt data/ipv6_source.txt
 
       - name: Get date
+        if: steps.release_exists.outputs.exists != 'true'
         id: date
         run: echo "date=$(date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
 
       - name: Create release
+        if: steps.release_exists.outputs.exists != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.upstream.outputs.upstream_tag }}
@@ -150,3 +199,37 @@ jobs:
             data/ipv4_source.txt
             data/ipv6_source.txt
           fail_on_unmatched_files: true
+
+      - name: Prune old releases (keep latest 2)
+        if: steps.release_exists.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          api_url="https://api.github.com/repos/${{ github.repository }}/releases?per_page=100"
+          old_releases="$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "$api_url" | jq -r '.[2:][]? | "\(.id)\t\(.tag_name)"')"
+
+          if [ -z "$old_releases" ]; then
+            echo "No old releases to prune."
+            exit 0
+          fi
+
+          while IFS=$'\t' read -r release_id tag_name; do
+            [ -z "$release_id" ] && continue
+            echo "Deleting release id=$release_id tag=$tag_name"
+            curl -fsS -X DELETE \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/${release_id}"
+
+            if [ -n "$tag_name" ] && [ "$tag_name" != "null" ]; then
+              echo "Deleting tag $tag_name"
+              curl -fsS -X DELETE \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/${tag_name}" || true
+            fi
+          done <<< "$old_releases"
