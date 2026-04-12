@@ -1,4 +1,4 @@
-name: "拉取行政区划表"
+name: "拉取文件"
 
 on:
   workflow_dispatch:
@@ -14,13 +14,13 @@ jobs:
       - name: Download location.json
         run: |
           curl -L \
-            https://raw.githubusercontent.com/darlene-he/location/main/data/location.json \
-            -o location.json
+            https://github.com/pyecharts/geo-region-coords/raw/refs/heads/master/coords.json \
+            -o coords.json
 
       - name: Commit file
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add location.json
-          git commit -m "Update location.json" || echo "No changes to commit"
+          git commit -m "Update coords.json" || echo "No changes to commit"
           git push
