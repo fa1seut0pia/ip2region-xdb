@@ -14,7 +14,7 @@ URLS=(
     "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb"
     "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-Country.mmdb"
     # GeoCN 数据库（中国 IP）
-    "https://github.com/ljxi/GeoCN/releases/download/Latest/GeoCN.mmdb"
+    "https://github.com/ljxi/GeoCN/releases/latest/download/GeoCN.mmdb"
 )
 
 echo "=============================================="
