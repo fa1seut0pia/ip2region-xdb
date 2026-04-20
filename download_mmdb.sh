@@ -24,8 +24,12 @@ echo "数据目录: $(pwd)"
 echo ""
 
 for URL in "${URLS[@]}"; do
+    FILE_NAME="$(basename "$URL")"
+    TEMP_FILE="${FILE_NAME}.download"
     echo "[信息] 下载: $URL"
-    curl -# -fL --retry 3 --remote-name --remote-time --continue-at - "$URL"
+    rm -f "$TEMP_FILE"
+    curl -# -fL --retry 3 --remote-time --output "$TEMP_FILE" "$URL"
+    mv -f "$TEMP_FILE" "$FILE_NAME"
 done
 
 echo ""
