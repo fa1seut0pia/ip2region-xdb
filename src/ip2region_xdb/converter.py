@@ -8,7 +8,6 @@ GeoLite2 mmdb 转 ip2region xdb 源文件转换器
 3. GeoLite2-City/Country/ASN.mmdb - 非中国 IP 数据
 """
 
-import heapq
 import ipaddress
 import os
 import sys
@@ -49,7 +48,7 @@ class IPRecord:
     使用 __slots__ 减少内存占用，提高访问速度。
     """
     __slots__ = ('start_ip', 'end_ip', 'continent', 'country', 'province',
-                 'city', 'districts', 'isp', 'net', 'priority', '_data_tuple')
+                 'city', 'districts', 'isp', 'net', 'priority')
 
     def __init__(self, start_ip: int, end_ip: int, continent: str = "",
                  country: str = "", province: str = "", city: str = "",
@@ -65,8 +64,6 @@ class IPRecord:
         self.isp = isp
         self.net = net
         self.priority = priority
-        # 缓存数据元组用于快速比较
-        self._data_tuple = (continent, country, province, city, districts, isp, net)
 
     @staticmethod
     def _int_to_ipv4_str(ip_int: int) -> str:
@@ -86,15 +83,23 @@ class IPRecord:
         return f"{start}|{end}|{self.continent}|{self.country}|{self.province}|{self.city}|{self.districts}|{self.isp}|{self.net}"
 
     def same_data(self, other: 'IPRecord') -> bool:
-        """检查两条记录的数据是否相同（不含 IP 范围）。使用缓存的元组快速比较。"""
-        return self._data_tuple == other._data_tuple
+        """检查两条记录的数据是否相同（不含 IP 范围）。"""
+        return (
+            self.continent == other.continent and
+            self.country == other.country and
+            self.province == other.province and
+            self.city == other.city and
+            self.districts == other.districts and
+            self.isp == other.isp and
+            self.net == other.net
+        )
 
     def merge_with(self, other: 'IPRecord') -> bool:
         """
         尝试与另一条记录合并（如果它们相邻且数据相同）。
         合并成功返回 True。
         """
-        if self.end_ip + 1 == other.start_ip and self._data_tuple == other._data_tuple:
+        if self.end_ip + 1 == other.start_ip and self.same_data(other):
             self.end_ip = other.end_ip
             return True
         return False
@@ -692,109 +697,129 @@ class MMDBConverter:
         """
         规范化 IP 范围，确保没有重叠或间隙。
         高优先级记录会覆盖低优先级记录。
-        使用最大堆优化优先级查找。
+
+        热点优化：
+        - 增量维护 top_priority，避免每次 max(active_priorities)
+        - state_dirty 标志 + tuple 缓存：仅在 top 组合成变化时重新合成
+        - 用 tuple 直接与 last_norm 字段比对，跳过"先造候选 IPRecord 再 same_data"
+        - Gap 区段用 last_norm.end_ip 延伸覆盖，省去一次 IPRecord 构造
         """
         if not records:
             return []
 
         Log.info("正在规范化 IP 范围...")
 
-        # 使用事件驱动的方式处理重叠
-        # 每个记录产生两个事件：开始和结束
-        # 事件编码为纯数值元组，避免字符串比较
-        # (ip, event_type, -priority, index, record)
-        # event_type: 0=start, 1=end
+        # 半开区间 [start, end+1) 的扫描线：共享端点处的优先级切换不会丢失边界 IP。
+        # 事件元组 (ip, event_type, -priority, index, record)，event_type: 0=add, 1=remove。
         events = []
         events_append = events.append
         for i, record in enumerate(records):
             events_append((record.start_ip, 0, -record.priority, i, record))
-            events_append((record.end_ip, 1, -record.priority, i, record))
+            events_append((record.end_ip + 1, 1, -record.priority, i, record))
 
-        # 排序：按 IP 位置，开始事件优先于结束事件，高优先级优先（-priority 越小越高）
         events.sort()
 
-        # 扫描线算法 - 使用最大堆优化
-        # Python heapq 是最小堆，所以用负优先级实现最大堆
-        active_heap = []  # [(-priority, record_idx, record), ...]
-        active_set = set()  # 记录当前活跃的 record_idx
-        normalized = []
+        # 按优先级分组的活跃记录。只有最高优先级组参与合成，因此增量维护 top_priority。
+        active_by_priority: dict[int, dict[int, IPRecord]] = {}
+        top_priority: int | None = None
+
+        # 缓存 top 组合成出的状态 tuple：(continent, country, province, city, districts, isp, net, priority)
+        top_state: tuple | None = None
+        state_dirty = False
+
+        normalized: list[IPRecord] = []
         normalized_append = normalized.append
-        last_ip = None
+        last_ip: int | None = None
 
         total_events = len(events)
         progress_step = total_events // 10 or 1
         next_progress = progress_step
 
-        _heappush = heapq.heappush
-        _heappop = heapq.heappop
+        idx = 0
+        while idx < total_events:
+            ip = events[idx][0]
 
-        for idx in range(total_events):
-            ip, event_type, neg_priority, record_idx, record = events[idx]
-
-            # 进度报告（每10%报告一次）
             if idx >= next_progress:
                 Log.info(f"规范化进度: {idx * 100 // total_events}%")
                 next_progress += progress_step
 
-            # 在处理当前事件前，输出上一个区间
-            if last_ip is not None and ip > last_ip:
-                # 获取当前最高优先级的活跃记录（内联 get_top_record）
-                while active_heap and active_heap[0][1] not in active_set:
-                    _heappop(active_heap)
+            # 在处理当前事件前，输出上一个稳定区间 [last_ip, ip - 1]。
+            if last_ip is not None and ip > last_ip and top_priority is not None:
+                if state_dirty:
+                    continent = country = province = city = districts = isp = net = ""
+                    for rec in active_by_priority[top_priority].values():
+                        if rec.continent and not continent:
+                            continent = rec.continent
+                        if rec.country and not country:
+                            country = rec.country
+                        if rec.province and not province:
+                            province = rec.province
+                        if rec.city and not city:
+                            city = rec.city
+                        if rec.districts and not districts:
+                            districts = rec.districts
+                        if rec.isp and not isp:
+                            isp = rec.isp
+                        if rec.net and not net:
+                            net = rec.net
+                    top_state = (continent, country, province, city,
+                                 districts, isp, net, top_priority)
+                    state_dirty = False
 
-                if active_heap:
-                    current_record = active_heap[0][2]
-                    # 创建新记录
-                    new_end = ip - 1 if event_type == 0 else ip
-                    new_record = IPRecord(
-                        start_ip=last_ip,
-                        end_ip=new_end,
-                        continent=current_record.continent,
-                        country=current_record.country,
-                        province=current_record.province,
-                        city=current_record.city,
-                        districts=current_record.districts,
-                        isp=current_record.isp,
-                        net=current_record.net,
-                        priority=current_record.priority
-                    )
+                interval_end = ip - 1
 
-                    # 尝试与上一条记录合并
-                    if normalized:
-                        last_norm = normalized[-1]
-                        if last_norm.end_ip + 1 == new_record.start_ip:
-                            if last_norm._data_tuple == new_record._data_tuple:
-                                last_norm.end_ip = new_end
-                            else:
-                                normalized_append(new_record)
-                        else:
-                            # 有间隙，使用前一条记录的数据填充
-                            if last_norm.end_ip + 1 < new_record.start_ip:
-                                gap_record = IPRecord(
-                                    start_ip=last_norm.end_ip + 1,
-                                    end_ip=new_record.start_ip - 1,
-                                    continent=last_norm.continent,
-                                    country=last_norm.country,
-                                    province=last_norm.province,
-                                    city=last_norm.city,
-                                    districts=last_norm.districts,
-                                    isp=last_norm.isp,
-                                    net=last_norm.net,
-                                    priority=last_norm.priority
-                                )
-                                normalized_append(gap_record)
-                            normalized_append(new_record)
+                if normalized:
+                    last_norm = normalized[-1]
+                    prev_end_next = last_norm.end_ip + 1
+                    # Gap 段的数据沿用 last_norm，直接把它延伸到本段起点前，省一次构造。
+                    if prev_end_next < last_ip:
+                        last_norm.end_ip = last_ip - 1
+                        prev_end_next = last_ip
+                    if (prev_end_next == last_ip
+                            and last_norm.continent == top_state[0]
+                            and last_norm.country == top_state[1]
+                            and last_norm.province == top_state[2]
+                            and last_norm.city == top_state[3]
+                            and last_norm.districts == top_state[4]
+                            and last_norm.isp == top_state[5]
+                            and last_norm.net == top_state[6]):
+                        last_norm.end_ip = interval_end
                     else:
-                        normalized_append(new_record)
+                        normalized_append(IPRecord(last_ip, interval_end, *top_state))
+                else:
+                    normalized_append(IPRecord(last_ip, interval_end, *top_state))
 
-            # 处理事件
-            if event_type == 0:  # start
-                _heappush(active_heap, (neg_priority, record_idx, record))
-                active_set.add(record_idx)
-                last_ip = ip
-            else:  # end
-                active_set.discard(record_idx)
-                last_ip = ip + 1
+            while idx < total_events and events[idx][0] == ip:
+                event = events[idx]
+                event_type = event[1]
+                priority = -event[2]
+                record_idx = event[3]
+                record = event[4]
+                if event_type == 0:  # add
+                    group = active_by_priority.get(priority)
+                    if group is None:
+                        active_by_priority[priority] = {record_idx: record}
+                        if top_priority is None or priority > top_priority:
+                            top_priority = priority
+                            state_dirty = True
+                    else:
+                        group[record_idx] = record
+                        if priority == top_priority:
+                            state_dirty = True
+                else:  # remove
+                    group = active_by_priority.get(priority)
+                    if group is not None:
+                        group.pop(record_idx, None)
+                        if not group:
+                            del active_by_priority[priority]
+                            if priority == top_priority:
+                                top_priority = max(active_by_priority) if active_by_priority else None
+                                state_dirty = True
+                        elif priority == top_priority:
+                            state_dirty = True
+                idx += 1
+
+            last_ip = ip
 
         Log.info(f"规范化后: {len(normalized)} 条记录")
         return normalized
@@ -879,6 +904,7 @@ def main():
         help="GeoLite2-Country.mmdb 文件路径"
     )
     parser.add_argument(
+
         "--asn", "-a",
         default="data/GeoLite2-ASN.mmdb",
         help="GeoLite2-ASN.mmdb 文件路径"
@@ -947,6 +973,10 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except maxminddb.errors.InvalidDatabaseError as exc:
+        Log.error(f"MMDB 数据库无效或已损坏: {exc}")
+        Log.error("请删除 data/*.mmdb 后重新下载。旧的断点续传文件可能会把不同版本的数据库拼接在一起。")
+        sys.exit(1)
     except KeyboardInterrupt:
         print("\n")
         Log.info("用户中断，程序退出")
