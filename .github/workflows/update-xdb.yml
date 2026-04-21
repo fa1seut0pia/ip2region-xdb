@@ -83,12 +83,35 @@ jobs:
           set -euo pipefail
           pip install -e .
 
-      - name: Download mmdb files
+      - name: Download source data files
         if: steps.release_exists.outputs.exists != 'true'
         run: |
           set -euo pipefail
           chmod +x ./download_mmdb.sh
           ./download_mmdb.sh data
+
+      - name: Validate downloaded source files
+        if: steps.release_exists.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          for f in \
+            data/GeoLite2-City.mmdb \
+            data/GeoLite2-Country.mmdb \
+            data/GeoLite2-ASN.mmdb \
+            data/GeoCN.mmdb \
+            data/provinces.json \
+            data/cities.json \
+            data/areas.json; do
+            test -s "$f" || { echo "::error::$f is missing or empty"; exit 1; }
+          done
+          ls -lh \
+            data/GeoLite2-City.mmdb \
+            data/GeoLite2-Country.mmdb \
+            data/GeoLite2-ASN.mmdb \
+            data/GeoCN.mmdb \
+            data/provinces.json \
+            data/cities.json \
+            data/areas.json
 
       - name: Convert to source text files
         if: steps.release_exists.outputs.exists != 'true'

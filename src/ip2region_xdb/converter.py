@@ -11,6 +11,7 @@ GeoLite2 mmdb 转 ip2region xdb 源文件转换器
 import ipaddress
 import os
 import sys
+import json
 from datetime import datetime
 from functools import lru_cache
 from typing import Iterator
@@ -181,13 +182,14 @@ class MMDBConverter:
 
     def __init__(self, city_path: str, country_path: str, asn_path: str,
                  geocn_path: str = None, internal_ip_path: str = None,
-                 data_dir: str = "data"):
+                 data_dir: str = "data", division_data_dir: str | None = None):
         self.city_path = city_path
         self.country_path = country_path
         self.asn_path = asn_path
         self.geocn_path = geocn_path
         self.internal_ip_path = internal_ip_path
         self.data_dir = data_dir
+        self.division_data_dir = division_data_dir or os.path.dirname(geocn_path or "") or "data"
 
         # 确保数据目录存在
         os.makedirs(data_dir, exist_ok=True)
@@ -317,6 +319,73 @@ class MMDBConverter:
     # GeoCN 固定值缓存
     _GEOCN_CONTINENT = sys.intern("亚洲")
     _GEOCN_COUNTRY = sys.intern("中国")
+    _SPECIAL_CITY_NAMES = frozenset({"市辖区", "县", "自治区直辖县级行政区划"})
+    _division_name_cache: dict[str, tuple[dict[str, str], dict[str, str], dict[str, str]]] = {}
+    _missing_division_data_dirs: set[str] = set()
+
+    @classmethod
+    def _load_division_file(cls, path: str) -> dict[str, str]:
+        with open(path, "r", encoding="utf-8") as f:
+            return {
+                item["code"]: sys.intern(item["name"])
+                for item in json.load(f)
+            }
+
+    def _load_division_names(self) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+        """懒加载中国行政区划名称映射。"""
+        data_dir = os.path.abspath(self.division_data_dir)
+        cached = self._division_name_cache.get(data_dir)
+        if cached is not None:
+            return cached
+
+        provinces_path = os.path.join(data_dir, "provinces.json")
+        cities_path = os.path.join(data_dir, "cities.json")
+        areas_path = os.path.join(data_dir, "areas.json")
+        required_paths = (provinces_path, cities_path, areas_path)
+
+        if not all(os.path.exists(path) for path in required_paths):
+            if data_dir not in self._missing_division_data_dirs:
+                missing = ", ".join(path for path in required_paths if not os.path.exists(path))
+                Log.warn(f"区域数据文件缺失，division_code 将无法展开: {missing}")
+                self._missing_division_data_dirs.add(data_dir)
+            empty = ({}, {}, {})
+            self._division_name_cache[data_dir] = empty
+            return empty
+
+        loaded = (
+            self._load_division_file(provinces_path),
+            self._load_division_file(cities_path),
+            self._load_division_file(areas_path),
+        )
+        self._division_name_cache[data_dir] = loaded
+        return loaded
+
+    @lru_cache(maxsize=4096)
+    def _resolve_division_code(self, division_code: int | str | None) -> tuple[str, str, str]:
+        """将 6 位行政区划码解析为省/市/区县名称。"""
+        if division_code is None:
+            return ("", "", "")
+
+        code = f"{int(division_code):06d}" if isinstance(division_code, int) else str(division_code).strip()
+        if not code.isdigit():
+            return ("", "", "")
+        code = code.zfill(6)
+
+        province_names, city_names, area_names = self._load_division_names()
+        province = province_names.get(code[:2], "")
+        city = city_names.get(code[:4], "")
+        districts = area_names.get(code, "")
+
+        if city in self._SPECIAL_CITY_NAMES:
+            city = province
+
+        if code.endswith("0000"):
+            city = ""
+            districts = ""
+        elif code.endswith("00"):
+            districts = ""
+
+        return (province, city, districts)
 
     def _parse_geocn_record(self, data: dict) -> dict:
         """
@@ -324,7 +393,7 @@ class MMDBConverter:
 
         GeoCN 字段：
         - isp: 运营商（如：中国移动）
-        - net: 网络类型（如：宽带）
+        - type: 网络类型（如：宽带）
         - province: 省份（如：四川省）
         - city: 城市（如：成都市）
         - districts: 区县（如：武侯区）
@@ -338,14 +407,21 @@ class MMDBConverter:
 
         # 直接访问字典，避免函数调用开销
         get = data.get
+        province = str(get("province", "") or "")
+        city = str(get("city", "") or "")
+        districts = str(get("districts", "") or "")
+
+        if not (province or city or districts):
+            province, city, districts = self._resolve_division_code(get("division_code"))
+
         return {
             "continent": self._GEOCN_CONTINENT,
             "country": self._GEOCN_COUNTRY,
-            "province": sys.intern(str(get("province", "") or "")),
-            "city": sys.intern(str(get("city", "") or "")),
-            "districts": sys.intern(str(get("districts", "") or "")),
+            "province": sys.intern(province) if province else "",
+            "city": sys.intern(city) if city else "",
+            "districts": sys.intern(districts) if districts else "",
             "isp": sys.intern(str(get("isp", "") or "")),
-            "net": sys.intern(str(get("net", "") or ""))
+            "net": sys.intern(str(get("type", "") or ""))
         }
 
     @staticmethod
@@ -915,6 +991,11 @@ def main():
         help="GeoCN.mmdb 文件路径（中国 IP 数据）"
     )
     parser.add_argument(
+        "--division-data-dir",
+        default=None,
+        help="区域数据目录路径，目录下需包含 provinces.json、cities.json、areas.json；默认使用 GeoCN.mmdb 所在目录"
+    )
+    parser.add_argument(
         "--internal", "-i",
         default="data/内网IP.txt",
         help="内网 IP 文件路径"
@@ -958,7 +1039,8 @@ def main():
         asn_path=args.asn,
         geocn_path=args.geocn,
         internal_ip_path=args.internal,
-        data_dir=args.output
+        data_dir=args.output,
+        division_data_dir=args.division_data_dir
     )
 
     # 使用一次性加载方式处理（每个数据库只读取一次）

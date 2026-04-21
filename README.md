@@ -56,6 +56,7 @@ uv sync
 - `GeoLite2-City.mmdb` - 城市级别地理数据
 - `GeoLite2-Country.mmdb` - 国家级别地理数据
 - `GeoCN.mmdb` - 中国 IP 详细数据
+- `provinces.json` / `cities.json` / `areas.json` - 中国行政区划数据（用于展开 `division_code`）
 
 ### 运行转换
 

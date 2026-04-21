@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 下载 GeoLite2 和 GeoCN mmdb 文件
+# 下载 GeoLite2、GeoCN 和区域数据文件
 
 set -e
 
@@ -7,7 +7,7 @@ DATA_DIR="${1:-data}"
 mkdir -p "$DATA_DIR"
 cd "$DATA_DIR"
 
-# 数据库 URL
+# 数据源 URL
 URLS=(
     # GeoLite2 数据库（非中国 IP）
     "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-ASN.mmdb"
@@ -15,6 +15,10 @@ URLS=(
     "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-Country.mmdb"
     # GeoCN 数据库（中国 IP）
     "https://github.com/ljxi/GeoCN/releases/latest/download/GeoCN.mmdb"
+    # 中国行政区划数据（division_code -> 省/市/区）
+    "https://raw.githubusercontent.com/modood/Administrative-divisions-of-China/master/dist/provinces.json"
+    "https://raw.githubusercontent.com/modood/Administrative-divisions-of-China/master/dist/cities.json"
+    "https://raw.githubusercontent.com/modood/Administrative-divisions-of-China/master/dist/areas.json"
 )
 
 echo "=============================================="
@@ -34,4 +38,4 @@ done
 
 echo ""
 echo "[信息] 下载完成！"
-ls -lh *.mmdb 2>/dev/null || echo "[警告] 未找到 mmdb 文件"
+ls -lh *.mmdb *.json 2>/dev/null || echo "[警告] 未找到下载文件"
