@@ -11,7 +11,6 @@ GeoLite2 mmdb 转 ip2region xdb 源文件转换器
 import ipaddress
 import os
 import sys
-import json
 import bisect
 from datetime import datetime
 from functools import lru_cache
@@ -115,62 +114,37 @@ class MMDBConverter:
     PRIORITY_GEOCN = 2        # GeoCN 数据（中国）
     PRIORITY_INTERNAL = 10    # 内网 IP（最高优先级）
 
-    # ASN 映射表 - 将常见 ASN 编号转为中文名称
-    ASN_MAP = {
-        # 有线电视/广电
-        9812: "东方有线",
-        9389: "中国长城",
-        17962: "天威视讯",
-        17429: "歌华有线",
-        24139: "华数",
-        58461: "鹏博士",
-        # 科研/教育
-        7497: "科技网",
-        4538: "教育网",
-        9801: "中关村",
-        24151: "CNNIC",
-        # 中国移动
-        38019: "中国移动", 139080: "中国移动", 9808: "中国移动", 24400: "中国移动",
-        134810: "中国移动", 24547: "中国移动", 56040: "中国移动", 56041: "中国移动",
-        56042: "中国移动", 56044: "中国移动", 132525: "中国移动", 56046: "中国移动",
-        56047: "中国移动", 56048: "中国移动", 59257: "中国移动", 24444: "中国移动",
-        24445: "中国移动", 137872: "中国移动", 9231: "中国移动", 58453: "中国移动",
-        # 中国电信
-        4134: "中国电信", 4812: "中国电信", 23724: "中国电信", 136188: "中国电信",
-        137693: "中国电信", 17638: "中国电信", 140553: "中国电信", 4847: "中国电信",
-        140061: "中国电信", 136195: "中国电信", 17799: "中国电信", 139018: "中国电信",
-        134764: "中国电信", 4809: "中国电信CN2",
-        # 中国联通
-        4837: "中国联通", 4808: "中国联通", 134542: "中国联通", 134543: "中国联通",
-        17621: "中国联通", 17623: "中国联通", 9929: "中国联通精品网",
-        # 国内云服务商
-        59019: "金山云",
-        135377: "优刻云",
-        45062: "网易云",
-        37963: "阿里云", 45102: "阿里云国际",
-        45090: "腾讯云", 132203: "腾讯云国际",
-        55967: "百度云", 38365: "百度云",
-        58519: "华为云", 55990: "华为云", 136907: "华为云",
-        131072: "京东云",
-        138950: "火山引擎",
-        63646: "七牛云",
-        141679: "天翼云",
-        # 港澳台
-        4609: "澳門電訊",
-        9269: "香港宽频",
-        4515: "香港电讯",
-        9304: "香港有线宽频",
-        3462: "中华电信",
-        17709: "亚太电信",
-        # 国际云服务商
-        13335: "Cloudflare",
-        55960: "亚马逊云", 14618: "亚马逊云", 16509: "亚马逊云",
-        15169: "谷歌云", 396982: "谷歌云", 36492: "谷歌云",
-        8075: "微软云",
-        14061: "DigitalOcean",
-        63949: "Linode",
-        20940: "Akamai",
-    }
+    # ASN 映射表 - 从 asn.txt 懒加载
+    _asn_map_cache: dict[str, dict[int, str]] = {}
+
+    @classmethod
+    def _load_asn_map(cls, data_dir: str) -> dict[int, str]:
+        """从 asn.txt 加载 ASN→运营商映射（格式：ASN\\t运营商名）。"""
+        abs_dir = os.path.abspath(data_dir)
+        cached = cls._asn_map_cache.get(abs_dir)
+        if cached is not None:
+            return cached
+
+        asn_map = {}
+        asn_path = os.path.join(abs_dir, "asn.txt")
+        if os.path.exists(asn_path):
+            with open(asn_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split('\t', 1)
+                    if len(parts) == 2:
+                        try:
+                            asn_map[int(parts[0])] = sys.intern(parts[1])
+                        except ValueError:
+                            continue
+            Log.info(f"加载 ASN 映射: {len(asn_map)} 条")
+        else:
+            Log.warn(f"ASN 映射文件未找到: {asn_path}")
+
+        cls._asn_map_cache[abs_dir] = asn_map
+        return asn_map
 
     # 港澳台地区名称映射
     HMT_REGIONS = {"香港", "澳门", "台湾"}
@@ -308,8 +282,9 @@ class MMDBConverter:
         if not asn:
             return ("", "")
 
-        # ISP - 优先使用 ASN 映射表中的中文名称
-        isp = self.ASN_MAP.get(asn)
+        # ISP - 优先使用 asn.txt 映射中的中文名称
+        asn_map = self._load_asn_map(self.data_dir)
+        isp = asn_map.get(asn)
         if not isp:
             # 回退到原始组织名称
             org = data.get("autonomous_system_organization")
@@ -326,67 +301,116 @@ class MMDBConverter:
     _division_alias_cache: dict[str, tuple[dict[str, str], dict[str, str]]] = {}
 
     @classmethod
-    def _load_division_file(cls, path: str) -> dict[str, str]:
+    def _load_division_txt(cls, path: str) -> dict[str, str]:
+        """加载 full.txt 或 short.txt 格式的行政区划数据（code\\t/tab name）。"""
+        result = {}
         with open(path, "r", encoding="utf-8") as f:
-            return {
-                item["code"]: sys.intern(item["name"])
-                for item in json.load(f)
-            }
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                # full.txt 用 tab，short.txt 用两个空格
+                parts = line.split('\t', 1) if '\t' in line else line.split(None, 1)
+                if len(parts) == 2:
+                    result[parts[0]] = sys.intern(parts[1])
+        return result
 
     def _load_division_names(self) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
-        """懒加载中国行政区划名称映射。"""
+        """懒加载中国行政区划名称映射，从 full.txt 读取。"""
         data_dir = os.path.abspath(self.division_data_dir)
         cached = self._division_name_cache.get(data_dir)
         if cached is not None:
             return cached
 
-        provinces_path = os.path.join(data_dir, "provinces.json")
-        cities_path = os.path.join(data_dir, "cities.json")
-        areas_path = os.path.join(data_dir, "areas.json")
-        required_paths = (provinces_path, cities_path, areas_path)
+        full_path = os.path.join(data_dir, "full.txt")
+        # 兼容旧的 JSON 格式
+        provinces_json = os.path.join(data_dir, "provinces.json")
 
-        if not all(os.path.exists(path) for path in required_paths):
+        if os.path.exists(full_path):
+            all_names = self._load_division_txt(full_path)
+            # full.txt 全部是 6 位 code：省 XX0000，市 XXXX00，区 XXXXXX
+            provinces = {}
+            cities = {}
+            areas = {}
+            for k, v in all_names.items():
+                if len(k) == 6:
+                    if k.endswith("0000"):
+                        provinces[k[:2]] = v
+                    elif k.endswith("00"):
+                        cities[k[:4]] = v
+                    else:
+                        areas[k] = v
+        elif all(os.path.exists(p) for p in (provinces_json,
+                                               os.path.join(data_dir, "cities.json"),
+                                               os.path.join(data_dir, "areas.json"))):
+            import json
+            provinces = {}
+            cities = {}
+            areas = {}
+            for path, target in [(provinces_json, provinces),
+                                  (os.path.join(data_dir, "cities.json"), cities),
+                                  (os.path.join(data_dir, "areas.json"), areas)]:
+                with open(path, "r", encoding="utf-8") as f:
+                    for item in json.load(f):
+                        target[item["code"]] = sys.intern(item["name"])
+        else:
             if data_dir not in self._missing_division_data_dirs:
-                missing = ", ".join(path for path in required_paths if not os.path.exists(path))
-                Log.warn(f"区域数据文件缺失，division_code 将无法展开: {missing}")
+                Log.warn(f"区域数据文件缺失（需要 full.txt 或 provinces.json/cities.json/areas.json）: {data_dir}")
                 self._missing_division_data_dirs.add(data_dir)
             empty = ({}, {}, {})
             self._division_name_cache[data_dir] = empty
             return empty
 
-        loaded = (
-            self._load_division_file(provinces_path),
-            self._load_division_file(cities_path),
-            self._load_division_file(areas_path),
-        )
+        loaded = (provinces, cities, areas)
         self._division_name_cache[data_dir] = loaded
+        Log.info(f"加载行政区划: 省 {len(provinces)} 市 {len(cities)} 区 {len(areas)}")
         return loaded
 
     def _load_division_aliases(self) -> tuple[dict[str, str], dict[str, str]]:
-        """懒加载行政区划简称→全称映射（用于 GeoLite2 短名规范化）。"""
+        """懒加载行政区划简称→全称映射，从 short.txt + full.txt 构建。"""
         data_dir = os.path.abspath(self.division_data_dir)
         cached = self._division_alias_cache.get(data_dir)
         if cached is not None:
             return cached
 
-        provinces, cities, _ = self._load_division_names()
+        short_path = os.path.join(data_dir, "short.txt")
+        full_path = os.path.join(data_dir, "full.txt")
 
-        # 去掉末尾"省/市/自治区/特别行政区/壮族/回族/维吾尔"等后缀 → 全称
-        _SUFFIXES = ("省", "市", "自治区", "特别行政区")
+        if os.path.exists(short_path) and os.path.exists(full_path):
+            short_names = self._load_division_txt(short_path)
+            full_names = self._load_division_txt(full_path)
+            # 同一个 code：short 值 → full 值
+            provinces_alias = {}
+            cities_alias = {}
+            for code, short in short_names.items():
+                full = full_names.get(code, "")
+                if full and short != full:
+                    if len(code) == 6:
+                        if code.endswith("0000"):
+                            provinces_alias[short] = full
+                        elif code.endswith("00"):
+                            cities_alias[short] = full
+        else:
+            # 回退到从 full.txt 推导
+            provinces, cities, _ = self._load_division_names()
+            _SUFFIXES = ("省", "市", "自治区", "特别行政区")
 
-        def _build_alias(name_map: dict[str, str]) -> dict[str, str]:
-            alias = {}
-            for name in name_map.values():
-                short = name
-                for s in _SUFFIXES:
-                    if short.endswith(s):
-                        short = short[:-len(s)]
-                        break
-                if short != name:
-                    alias[short] = name
-            return alias
+            def _build_alias(name_map: dict[str, str]) -> dict[str, str]:
+                alias = {}
+                for name in name_map.values():
+                    short = name
+                    for s in _SUFFIXES:
+                        if short.endswith(s):
+                            short = short[:-len(s)]
+                            break
+                    if short != name:
+                        alias[short] = name
+                return alias
 
-        result = (_build_alias(provinces), _build_alias(cities))
+            provinces_alias = _build_alias(provinces)
+            cities_alias = _build_alias(cities)
+
+        result = (provinces_alias, cities_alias)
         self._division_alias_cache[data_dir] = result
         return result
 
@@ -1079,7 +1103,7 @@ def main():
     parser.add_argument(
         "--division-data-dir",
         default=None,
-        help="区域数据目录路径，目录下需包含 provinces.json、cities.json、areas.json；默认使用 GeoCN.mmdb 所在目录"
+        help="区域数据目录路径，目录下需包含 full.txt + short.txt（或旧格式 provinces.json/cities.json/areas.json）；默认使用 GeoCN.mmdb 所在目录"
     )
     parser.add_argument(
         "--internal", "-i",
