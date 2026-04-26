@@ -12,6 +12,7 @@ import ipaddress
 import os
 import sys
 import json
+import bisect
 from datetime import datetime
 from functools import lru_cache
 from typing import Iterator
@@ -322,6 +323,7 @@ class MMDBConverter:
     _SPECIAL_CITY_NAMES = frozenset({"市辖区", "县", "自治区直辖县级行政区划"})
     _division_name_cache: dict[str, tuple[dict[str, str], dict[str, str], dict[str, str]]] = {}
     _missing_division_data_dirs: set[str] = set()
+    _division_alias_cache: dict[str, tuple[dict[str, str], dict[str, str]]] = {}
 
     @classmethod
     def _load_division_file(cls, path: str) -> dict[str, str]:
@@ -359,6 +361,43 @@ class MMDBConverter:
         )
         self._division_name_cache[data_dir] = loaded
         return loaded
+
+    def _load_division_aliases(self) -> tuple[dict[str, str], dict[str, str]]:
+        """懒加载行政区划简称→全称映射（用于 GeoLite2 短名规范化）。"""
+        data_dir = os.path.abspath(self.division_data_dir)
+        cached = self._division_alias_cache.get(data_dir)
+        if cached is not None:
+            return cached
+
+        provinces, cities, _ = self._load_division_names()
+
+        # 去掉末尾"省/市/自治区/特别行政区/壮族/回族/维吾尔"等后缀 → 全称
+        _SUFFIXES = ("省", "市", "自治区", "特别行政区")
+
+        def _build_alias(name_map: dict[str, str]) -> dict[str, str]:
+            alias = {}
+            for name in name_map.values():
+                short = name
+                for s in _SUFFIXES:
+                    if short.endswith(s):
+                        short = short[:-len(s)]
+                        break
+                if short != name:
+                    alias[short] = name
+            return alias
+
+        result = (_build_alias(provinces), _build_alias(cities))
+        self._division_alias_cache[data_dir] = result
+        return result
+
+    def _normalize_to_full_name(self, province: str, city: str) -> tuple[str, str]:
+        """将 GeoLite2 的短省/市名规范化为带后缀的全称。"""
+        if not province and not city:
+            return ("", "")
+        province_alias, city_alias = self._load_division_aliases()
+        province = province_alias.get(province, province)
+        city = city_alias.get(city, city)
+        return (province, city)
 
     @lru_cache(maxsize=4096)
     def _resolve_division_code(self, division_code: int | str | None) -> tuple[str, str, str]:
@@ -545,6 +584,22 @@ class MMDBConverter:
         Log.info(f"内网 IP: {len(records)} 条记录")
         return records
 
+    @staticmethod
+    def _normalize_city_name(city: str) -> str:
+        """规范化城市名称，去除后缀用于比对"""
+        return city.replace('市', '').replace('省', '').strip()
+
+    @staticmethod
+    def _lookup_city_by_ip(ranges: list[tuple[int, int, dict]], starts: list[int], ip_int: int) -> dict | None:
+        """按 IP 整数在有序区间中查找城市记录。"""
+        idx = bisect.bisect_right(starts, ip_int) - 1
+        if idx < 0:
+            return None
+        start_ip, end_ip, parsed = ranges[idx]
+        if start_ip <= ip_int <= end_ip:
+            return parsed
+        return None
+
     def _load_all_mmdb_records(self) -> tuple[dict, dict]:
         """
         一次性加载所有 MMDB 数据库，同时分离 IPv4 和 IPv6 记录。
@@ -560,58 +615,23 @@ class MMDBConverter:
         ipv6_geolite: dict[tuple[int, int], IPRecord] = {}
 
         # 预取常量到局部变量
-        _is_v4mapped = self._is_ipv4_mapped_v6
         _net_range = self._network_to_int_range
         _V4MAPPED_START = self._IPV4_MAPPED_V6_START
         _V4MAPPED_END = self._IPV4_MAPPED_V6_END
         _PRIO_GEOCN = self.PRIORITY_GEOCN
         _PRIO_GEOLITE = self.PRIORITY_GEOLITE
 
-        # 1. 加载 GeoCN 数据库（一次读取，分离 IPv4/IPv6）
-        if self.geocn_path and os.path.exists(self.geocn_path):
-            Log.info(f"读取 GeoCN 数据库: {self.geocn_path}")
-            v4_count, v6_count, v4_mapped_skipped = 0, 0, 0
-
-            with maxminddb.open_database(self.geocn_path) as reader:
-                for network, data in reader:
-                    is_v6 = network.version == 6
-                    start_ip, end_ip = _net_range(network)
-
-                    # 跳过 IPv4-mapped IPv6 地址
-                    if is_v6 and start_ip <= _V4MAPPED_END and end_ip >= _V4MAPPED_START:
-                        v4_mapped_skipped += 1
-                        continue
-
-                    parsed = self._parse_geocn_record(data)
-
-                    record = IPRecord(
-                        start_ip=start_ip,
-                        end_ip=end_ip,
-                        **parsed,
-                        priority=_PRIO_GEOCN
-                    )
-
-                    if is_v6:
-                        ipv6_geocn.append(record)
-                        v6_count += 1
-                    else:
-                        ipv4_geocn.append(record)
-                        v4_count += 1
-
-            Log.info(f"GeoCN 数据库: IPv4 {v4_count} 条, IPv6 {v6_count} 条（跳过 IPv4-mapped: {v4_mapped_skipped}）")
-
-        # 2. 加载城市数据库（一次读取，分离 IPv4/IPv6）
+        # 2. 加载城市数据库（一次读取，分离 IPv4/IPv6，同时建立中国城市索引用于冲突检测）
         Log.info(f"读取城市数据库: {self.city_path}")
         v4_count, v6_count, china_skipped, v4_mapped_skipped = 0, 0, 0, 0
         _is_china = self._is_china_ip
 
+        # 中国城市段索引：(start_ip, end_ip, parsed_city)
+        china_city_ranges_v4: list[tuple[int, int, dict]] = []
+        china_city_ranges_v6: list[tuple[int, int, dict]] = []
+
         with maxminddb.open_database(self.city_path) as reader:
             for network, data in reader:
-                # 跳过中国 IP
-                if _is_china(data):
-                    china_skipped += 1
-                    continue
-
                 is_v6 = network.version == 6
                 start_ip, end_ip = _net_range(network)
 
@@ -621,6 +641,15 @@ class MMDBConverter:
                     continue
 
                 parsed = self._parse_city_record(data)
+
+                if _is_china(data):
+                    # 中国 IP 只用于和 GeoCN 做冲突检测索引，不进入 GeoLite 输出
+                    if is_v6:
+                        china_city_ranges_v6.append((start_ip, end_ip, parsed))
+                    else:
+                        china_city_ranges_v4.append((start_ip, end_ip, parsed))
+                    china_skipped += 1
+                    continue
 
                 key = (start_ip, end_ip)
                 target_dict = ipv6_geolite if is_v6 else ipv4_geolite
@@ -650,7 +679,64 @@ class MMDBConverter:
                 else:
                     v4_count += 1
 
+        china_city_ranges_v4.sort(key=lambda x: x[0])
+        china_city_ranges_v6.sort(key=lambda x: x[0])
+        china_city_starts_v4 = [item[0] for item in china_city_ranges_v4]
+        china_city_starts_v6 = [item[0] for item in china_city_ranges_v6]
+
         Log.info(f"城市数据库: IPv4 {v4_count} 条, IPv6 {v6_count} 条（跳过中国 IP: {china_skipped}, IPv4-mapped: {v4_mapped_skipped}）")
+
+        # 1. 加载 GeoCN 数据库（一次读取，分离 IPv4/IPv6，并做冲突检测）
+        if self.geocn_path and os.path.exists(self.geocn_path):
+            Log.info(f"读取 GeoCN 数据库: {self.geocn_path}")
+            v4_count, v6_count, v4_mapped_skipped, conflicts = 0, 0, 0, 0
+
+            with maxminddb.open_database(self.geocn_path) as reader:
+                for network, data in reader:
+                    is_v6 = network.version == 6
+                    start_ip, end_ip = _net_range(network)
+
+                    # 跳过 IPv4-mapped IPv6 地址
+                    if is_v6 and start_ip <= _V4MAPPED_END and end_ip >= _V4MAPPED_START:
+                        v4_mapped_skipped += 1
+                        continue
+
+                    parsed = self._parse_geocn_record(data)
+
+                    # 冲突检测：按 GeoCN 网段首地址在中国城市索引中查找 GeoLite2 城市
+                    if is_v6:
+                        geolite_data = self._lookup_city_by_ip(china_city_ranges_v6, china_city_starts_v6, start_ip)
+                    else:
+                        geolite_data = self._lookup_city_by_ip(china_city_ranges_v4, china_city_starts_v4, start_ip)
+
+                    if geolite_data:
+                        geocn_city = self._normalize_city_name(parsed['city'])
+                        geolite_city = self._normalize_city_name(geolite_data['city'])
+
+                        # 城市冲突：以 GeoLite2 为准，丢弃 GeoCN 的区县，但保留 ISP/类型
+                        if geocn_city and geolite_city and geocn_city != geolite_city:
+                            conflicts += 1
+                            full_province, full_city = self._normalize_to_full_name(
+                                geolite_data['province'], geolite_data['city'])
+                            parsed['province'] = full_province
+                            parsed['city'] = full_city
+                            parsed['districts'] = ''
+
+                    record = IPRecord(
+                        start_ip=start_ip,
+                        end_ip=end_ip,
+                        **parsed,
+                        priority=_PRIO_GEOCN
+                    )
+
+                    if is_v6:
+                        ipv6_geocn.append(record)
+                        v6_count += 1
+                    else:
+                        ipv4_geocn.append(record)
+                        v4_count += 1
+
+            Log.info(f"GeoCN 数据库: IPv4 {v4_count} 条, IPv6 {v6_count} 条（跳过 IPv4-mapped: {v4_mapped_skipped}，城市冲突: {conflicts}）")
 
         # 3. 加载国家数据库（一次读取，分离 IPv4/IPv6）
         Log.info(f"读取国家数据库: {self.country_path}")
